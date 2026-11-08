@@ -367,7 +367,58 @@ fn handle_args(app: &AppHandle, args: &[String]) {
     }
 }
 
+/// Started from inside a job object (a shell in a Claude Code session, an installer
+/// run from one), this app would end with that job: closing Claude for a switch
+/// ends its job and with it the switch halfway. Starts a copy outside the job
+/// instead and returns true, so this one exits before claiming the single instance.
+#[cfg(windows)]
+fn left_job() -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    use windows_sys::Win32::System::{
+        JobObjects::IsProcessInJob,
+        Threading::{GetCurrentProcess, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW},
+    };
+
+    const MARK: &str = "--detached";
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut in_job = 0;
+    let checked = unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) } != 0;
+    if cfg!(debug_assertions) || !checked || in_job == 0 || args.iter().any(|a| a == MARK) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    // Most jobs let a child break away; Claude's do.
+    if Command::new(&exe).args(&args).arg(MARK).creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn().is_ok() {
+        return true;
+    }
+    // Otherwise WMI starts it, which is never inside the caller's job.
+    let line = std::iter::once(exe.to_string_lossy().to_string())
+        .chain(args)
+        .chain([MARK.to_string()])
+        .map(|a| format!("\"{}\"", a.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let command = format!(
+        "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{}' }}; exit $r.ReturnValue",
+        line.replace('\'', "''")
+    );
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(windows))]
+fn left_job() -> bool {
+    false
+}
+
 fn main() {
+    if left_job() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| handle_args(app, &args)))
         .plugin(tauri_plugin_dialog::init())

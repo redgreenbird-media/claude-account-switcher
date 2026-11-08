@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 – 2026-11-08
+
+- **Fixed**: a switch closed Claude but did not start it again, and the app was gone afterwards. Started from a Claude Code session (or an installer run from one), the app ran inside Claude's job object and Windows ended it together with Claude, before the login was swapped. The app now leaves such a job at start.
+- **Fixed**: Claude hung on a white window for a while after a switch. Closing its window only hides it in the tray, so after five seconds it was ended outright and had to recover on the next start. It is now asked to quit the way Windows does before an update (Restart Manager), saves and ends its sessions; only what is still running after 30 seconds is ended.
+
 ## 0.2.0 – 2026-11-08
 
 A real app instead of PowerShell scripts.

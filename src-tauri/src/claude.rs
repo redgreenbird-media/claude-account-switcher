@@ -87,27 +87,38 @@ pub fn start(user_data: &Path) -> Result<(), String> {
         .map_err(|e| format!("Claude starten: {e}"))
 }
 
-/// Claude Desktop's own processes and its Code sessions' engines.
-fn claude_pids(user_data: &Path) -> Vec<u32> {
+/// Claude Desktop's own processes and its Code sessions' engines: (pid, parent pid).
+fn claude_processes(user_data: &Path) -> Vec<(u32, u32)> {
     let engine = user_data.join("claude-code").to_string_lossy().to_ascii_lowercase();
     win::processes("claude.exe")
         .into_iter()
-        .filter(|(_, p)| {
-            let p = p.to_ascii_lowercase();
-            p.contains("\\windowsapps\\claude_") || p.starts_with(&engine)
+        .filter(|p| {
+            let path = p.path.to_ascii_lowercase();
+            path.contains("\\windowsapps\\claude_") || path.starts_with(&engine)
         })
-        .map(|(id, _)| id)
+        .map(|p| (p.id, p.parent))
         .collect()
 }
 
-/// Closes Claude Desktop: its windows first, then whatever is left.
+fn claude_pids(user_data: &Path) -> Vec<u32> {
+    claude_processes(user_data).into_iter().map(|(id, _)| id).collect()
+}
+
+/// Closes Claude Desktop the way Windows does for an update or sign-out, so it
+/// saves its state and ends its sessions; ends whatever is left after that.
+///
+/// A window close only hides Claude in the tray, and ending it outright makes
+/// the next start hang on a white window while it recovers.
 pub fn stop(user_data: &Path) -> Result<(), String> {
-    let running = claude_pids(user_data);
+    let running = claude_processes(user_data);
     if running.is_empty() {
         return Ok(());
     }
-    win::close_windows(&running);
-    if !wait_gone(user_data, Duration::from_secs(5)) {
+    let ids: Vec<u32> = running.iter().map(|(id, _)| *id).collect();
+    // The app itself: the Claude processes no other Claude process started.
+    let apps: Vec<u32> = running.iter().filter(|(_, parent)| !ids.contains(parent)).map(|(id, _)| *id).collect();
+    win::request_quit(&apps);
+    if !wait_gone(user_data, Duration::from_secs(30)) {
         for id in claude_pids(user_data) {
             win::end(id);
         }
@@ -134,16 +145,22 @@ fn wait_gone(user_data: &Path, max: Duration) -> bool {
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM},
+        Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE},
         System::{
             Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
-            Threading::{OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE},
+            RestartManager::{RmEndSession, RmRegisterResources, RmShutdown, RmStartSession, CCH_RM_SESSION_KEY, RM_UNIQUE_PROCESS},
+            Threading::{GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE},
         },
-        UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE},
     };
 
-    /// Running processes with this exe name: (pid, full path).
-    pub fn processes(name: &str) -> Vec<(u32, String)> {
+    pub struct Process {
+        pub id: u32,
+        pub parent: u32,
+        pub path: String,
+    }
+
+    /// Running processes with this exe name.
+    pub fn processes(name: &str) -> Vec<Process> {
         let mut out = Vec::new();
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -157,7 +174,7 @@ mod win {
                 let len = e.szExeFile.iter().position(|c| *c == 0).unwrap_or(e.szExeFile.len());
                 if String::from_utf16_lossy(&e.szExeFile[..len]).eq_ignore_ascii_case(name) {
                     if let Some(path) = image_path(e.th32ProcessID) {
-                        out.push((e.th32ProcessID, path));
+                        out.push(Process { id: e.th32ProcessID, parent: e.th32ParentProcessID, path });
                     }
                 }
                 ok = Process32NextW(snap, &mut e);
@@ -181,6 +198,42 @@ mod win {
         }
     }
 
+    /// The process with its start time, which the Restart Manager needs to tell it from a later one with the same id.
+    fn unique(pid: u32) -> Option<RM_UNIQUE_PROCESS> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let ok = GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+            CloseHandle(h);
+            (ok != 0).then_some(RM_UNIQUE_PROCESS { dwProcessId: pid, ProcessStartTime: created })
+        }
+    }
+
+    /// Asks these apps to quit through the Restart Manager: the "close app" end of
+    /// session Windows sends before an update, which apps answer by saving and quitting.
+    /// Returns once they quit or declined.
+    pub fn request_quit(pids: &[u32]) {
+        let apps: Vec<RM_UNIQUE_PROCESS> = pids.iter().filter_map(|id| unique(*id)).collect();
+        if apps.is_empty() {
+            return;
+        }
+        unsafe {
+            let mut session = 0u32;
+            let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+            if RmStartSession(&mut session, 0, key.as_mut_ptr()) != 0 {
+                return;
+            }
+            if RmRegisterResources(session, 0, std::ptr::null(), apps.len() as u32, apps.as_ptr(), 0, std::ptr::null()) == 0 {
+                // 0: no forced shutdown; whatever does not quit is ended by the caller.
+                RmShutdown(session, 0, None);
+            }
+            RmEndSession(session);
+        }
+    }
+
     /// Ends a process that did not close on its own.
     pub fn end(pid: u32) {
         unsafe {
@@ -191,32 +244,20 @@ mod win {
             }
         }
     }
-
-    /// Asks every visible top-level window of these processes to close.
-    pub fn close_windows(pids: &[u32]) {
-        unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
-            let pids = &*(data as *const Vec<u32>);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &mut pid);
-            if pids.contains(&pid) && IsWindowVisible(hwnd) != 0 {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
-            1
-        }
-        let list = pids.to_vec();
-        unsafe {
-            EnumWindows(Some(each), &list as *const Vec<u32> as LPARAM);
-        }
-    }
 }
 
 #[cfg(not(windows))]
 mod win {
-    pub fn processes(_: &str) -> Vec<(u32, String)> {
+    pub struct Process {
+        pub id: u32,
+        pub parent: u32,
+        pub path: String,
+    }
+    pub fn processes(_: &str) -> Vec<Process> {
         Vec::new()
     }
     pub fn end(_: u32) {}
-    pub fn close_windows(_: &[u32]) {}
+    pub fn request_quit(_: &[u32]) {}
 }
 
 #[cfg(test)]
@@ -240,8 +281,10 @@ mod tests {
     #[ignore]
     fn finds_running_claude() {
         let ud = find_user_data().expect("Claude Desktop data folder");
-        let pids = claude_pids(&ud);
-        println!("{} -> {} processes, signed in {:?}", ud.display(), pids.len(), signed_in(&ud));
-        assert!(!pids.is_empty());
+        let running = claude_processes(&ud);
+        let ids: Vec<u32> = running.iter().map(|(id, _)| *id).collect();
+        let apps: Vec<u32> = running.iter().filter(|(_, parent)| !ids.contains(parent)).map(|(id, _)| *id).collect();
+        println!("{} -> {} processes, app {:?}, signed in {:?}", ud.display(), ids.len(), apps, signed_in(&ud));
+        assert_eq!(apps.len(), 1, "one Claude Desktop main process");
     }
 }
