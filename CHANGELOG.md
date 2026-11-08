@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 – 2026-11-08
+
+A real app instead of PowerShell scripts.
+
+- **Claude Accounts app** (Tauri): tray icon and panel, starts with Windows, installs per user, published through the update server so Roost installs and updates it. Replaces `scripts/tray.ps1`, `switch.ps1`, `install.ps1` and `make-icon.ps1`.
+- **Limits for every account**: the app also reads Claude Desktop's own usage samples (`plan-usage-history.json`), so accounts without a recent Code session show their figures too. Without a reset time the panel shows the latest possible reset. Before, accounts other than the last active one showed nothing.
+- **Fixed**: the mod wrote all accounts into one `accounts.json` from a per-account store, so each account overwrote the others' limits. It now writes `limits\<uuid>.json` per account.
+- **Fixed**: the mod's band and panel stayed off because it derived Claude's data folder from `CLAUDE_CODE_EXECPATH`, which mods do not see that way. The app finds the folder itself; the mod no longer needs it.
+- **Terminal per account**: Claude Code with that account's own login in Windows Terminal, in parallel to Desktop (`~/.claude-accounts/<uuid>`). A second Claude Desktop instance is not possible: signed builds ignore `CLAUDE_USER_DATA_DIR`.
+- Own icon instead of Claude's logo.
+- Mod switches through the app (`claude-accounts.exe --switch <uuid>` / `--add`); without the app it shows the limits only.
 ## 0.1.0 – 2026-11-08
 
 First release.

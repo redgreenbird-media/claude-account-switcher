@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Accounts</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="panel">
+    <header>
+      <img src="icon.png" alt="" class="logo">
+      <h1>Claude Accounts</h1>
+      <button id="close" class="icon" title="Schliessen (Esc)" aria-label="Schliessen">
+        <svg viewBox="0 0 16 16" width="12" height="12"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <p id="notice" class="notice" hidden></p>
+    <section id="list" aria-live="polite"></section>
+    <button id="add" class="wide">
+      <svg viewBox="0 0 16 16" width="12" height="12"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      Account hinzufügen
+    </button>
+    <p class="hint">Wechseln schliesst Claude Desktop kurz und startet es mit dem anderen Login neu; laufende Antworten brechen ab, die Sessions bleiben. <b>Terminal</b> startet Claude Code mit dem Account parallel, ohne Desktop zu wechseln.</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -4,14 +4,41 @@ const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const NOW = Date.parse('2026-11-08T10:00:00')
 const HOUR = 3_600_000
+const ROOT = 'C:\\Users\\me\\AppData\\Local\\ClaudeAccountSwitcher'
+const APP = 'C:\\Users\\me\\AppData\\Local\\Claude Accounts\\claude-accounts.exe'
 
 const ENV: Record<string, string> = {
-  CLAUDE_CODE_EXECPATH:
-    'C:\\Users\\me\\AppData\\Local\\Claude-Data\\claude_x\\claude-code\\2.1.317\\abc\\claude.exe',
   CLAUDE_CODE_ENTRYPOINT: 'claude-desktop',
   LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local',
   CLAUDE_CODE_ACCOUNT_UUID: A,
   CLAUDE_CODE_USER_EMAIL: 'alice@example.com',
+  CLAUDE_CODE_ORGANIZATION_UUID: 'org-a',
+}
+
+// What the app published: Alice with an older reading, Bob with a reset five-hour window.
+const VIEW = {
+  app: APP,
+  accounts: [
+    {
+      id: A,
+      email: 'alice@example.com',
+      name: 'Alice',
+      hasProfile: false,
+      windows: [{ kind: 'five_hour', percent: 5, resetsAt: NOW + HOUR, isReset: false, at: NOW - HOUR }],
+      measuredAt: NOW - HOUR,
+    },
+    {
+      id: B,
+      email: 'bob@example.com',
+      name: 'Bob',
+      hasProfile: true,
+      windows: [
+        { kind: 'five_hour', percent: 80, resetsAt: NOW - HOUR, isReset: false, at: NOW - 3 * HOUR },
+        { kind: 'seven_day', percent: 41, resetsAt: NOW + 30 * HOUR, isReset: false, at: NOW - 3 * HOUR },
+      ],
+      measuredAt: NOW - 3 * HOUR,
+    },
+  ],
 }
 
 const PANE = {
@@ -28,28 +55,19 @@ const PANE = {
   },
 } as const
 
-test('lists both accounts with limits, reset times and a switch button', async ($, on) => {
+test('records its own limits, lists both accounts and switches through the app', async ($, on) => {
   const runs: string[][] = []
-  let stored: unknown = {
-    [B]: {
-      id: B,
-      email: 'bob@example.com',
-      // Five-hour window already reset; weekly still running.
-      limits: [
-        { kind: 'five_hour', percentUsed: 80, resetsAt: new Date(NOW - HOUR).toISOString() },
-        { kind: 'seven_day', percentUsed: 41, resetsAt: new Date(NOW + 30 * HOUR).toISOString() },
-      ],
-      measuredAt: NOW - 3 * HOUR,
-    },
-  }
+  const written: Record<string, string> = {}
   on('env.get', (_, e) => ({ value: ENV[e.name] }))
-  on('store.get', () => ({ value: stored }))
-  on('store.set', (_, e) => {
-    stored = e.value
+  on('fs.read', (_, e) => {
+    if (e.path === `${ROOT}\\view.json`) return { value: JSON.stringify(VIEW) as never }
+    throw new Error('ENOENT')
+  })
+  on('fs.write', (_, e) => {
+    written[e.path] = e.text
 
     return { value: undefined }
   })
-  on('fs.exists', (_, e) => ({ value: e.path.includes(B) }))
   on('clock.now', () => ({ value: NOW }))
   on('session.usage', () => ({
     value: {
@@ -72,9 +90,15 @@ test('lists both accounts with limits, reset times and a switch button', async (
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
+  const record = JSON.parse(written[`${ROOT}\\limits\\${A}.json`] ?? '{}')
+  expect(record.email).toBe('alice@example.com')
+  expect(record.orgId).toBe('org-a')
+  expect(record.limits.length).toBe(2)
+  expect(record.measuredAt).toBe(NOW)
+
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const alice = await ui.find({ type: 'Text', text: /alice@example\.com/ })
-  expect(alice?.text).toContain('aktiv')
+  expect((await ui.find({ type: 'Text', text: /alice@example\.com/ }))?.text).toContain('aktiv')
+  // The session's own reading beats the app's older one.
   expect((await ui.find({ type: 'Text', text: /5h .*23%/ }))?.text).toContain('Reset in 2 h 30 min')
   expect((await ui.find({ type: 'Text', text: /Woche .*55%/ }))?.text).toBeTruthy()
   // Bob's five-hour window passed its reset: shown as 0 %.
@@ -85,7 +109,26 @@ test('lists both accounts with limits, reset times and a switch button', async (
   expect(runs.length).toBe(1)
   const command = runs[0]?.join(' ') ?? ''
   expect(command).toContain('Win32_Process')
-  expect(command).toContain(`-Mode switch -From ${A} -To ${B}`)
-  expect(command).toContain('-UserData "C:\\Users\\me\\AppData\\Local\\Claude-Data\\claude_x"')
+  expect(command).toContain(`"${APP}" --switch ${B}`)
+  await ui.unmount()
+})
+
+test('without the app: limits only, no switch buttons', async ($, on) => {
+  on('env.get', (_, e) => ({ value: ENV[e.name] }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: NOW }))
+  on('session.usage', () => ({ value: { startedAt: NOW, context: {} as never, rateLimits: [] } }))
+  on('command.register', () => ({ value: { command: 'accounts' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Claude Accounts/ }))?.text).toContain('Roost')
+  expect((await ui.find({ type: 'Text', text: /alice@example\.com/ }))?.text).toContain('aktiv')
+  expect(await ui.find({ type: 'Button', key: 'add' })).toBeFalsy()
   await ui.unmount()
 })

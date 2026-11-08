@@ -1,7 +1,6 @@
 # Written by Claude Code when it loads the mod
 .claude-plugin/types/
 
-# Built from the installed Claude Desktop logo by scripts/make-icon.ps1
-scripts/claude-accounts.ico
-
 node_modules/
+src-tauri/target/
+src-tauri/gen/

@@ -1,6 +1,6 @@
 {
   "name": "account-switcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Switch Claude Desktop accounts with one click and see each account's 5h and weekly limits with their reset times",
   "types": "./types/index.d.ts"
 }
