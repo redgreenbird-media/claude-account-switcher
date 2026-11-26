@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.0-beta.2 – 2026-11-26
+## 0.3.0-beta.3 – 2026-11-26
+
+The tag 0.3.0-beta.2 was never built (it still pointed at the self-hosted workflow); this is the same release.
 
 - **Daily pace on the weekly bar**: a mark shows how much of the weekly limit may be used by the end of today, one seventh per day of the window (day 1: 14 %, day 2: 29 %, …), so that the limit lasts until the reset. *Soll heute* under the bar gives the figure; the mark turns red once usage is past it.
 - **Click the account to show its Claude Desktop**: the whole card brings the account's Desktop to the front, not only the *Fenster*/*Zeigen* button. The active account shows the main Desktop, an account with a window of its own shows that one, any other opens a window from its saved login.
