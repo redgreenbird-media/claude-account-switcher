@@ -1,18 +1,19 @@
 name: release
-# Tag vX.Y.Z -> Windows setup (NSIS) of the Claude Accounts app plus the Claude Code mod as a plugin zip, built on our
-# own VM (update-server repo: runner-build, label linux-build: Rust, cargo-xwin and NSIS cross-compile the Windows app on
-# Linux). The publish job on the update-server runner of the same VM takes both from the handoff volume, puts them on
-# https://updates.redgreenbird.com (Roost lists and updates them) and creates the GitHub release. No GitHub-hosted
-# minutes, no GitHub artifacts. Tags with a dash (v1.2.0-beta.1) go to the beta channel. "Run workflow" builds without
-# publishing; the files stay in the handoff volume on the VM (7 days).
+# Tag vX.Y.Z -> Windows setup (NSIS) of the Claude Accounts app plus the Claude Code mod as a plugin zip, attached to a
+# GitHub release. This repository is public, and our self-hosted runners do not take jobs of public repositories, so
+# the build runs on a GitHub-hosted runner (free for public repositories). The update-server repository's
+# claude-accounts workflow picks up the release (only one created by this workflow) and publishes its files on
+# https://updates.redgreenbird.com, where Roost lists and updates them. Tags with a dash (v1.2.0-beta.1) become a
+# prerelease and go to the beta channel. "Run workflow" builds without releasing.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: [self-hosted, linux-build]
+  release:
+    runs-on: windows-latest
+    permissions: { contents: write }
     steps:
       - uses: actions/checkout@v4
       - name: Tag, VERSION, Cargo.toml and plugin.json agree
@@ -23,8 +24,6 @@ jobs:
           grep -q "\"version\": \"$v\"" .claude-plugin/plugin.json || { echo "::error::plugin.json version != VERSION ($v)"; exit 1; }
           if [[ $GITHUB_REF == refs/tags/* ]]; then test "v$v" = "$GITHUB_REF_NAME" || { echo "::error::tag != VERSION"; exit 1; }; fi
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src-tauri }
       - uses: actions/setup-node@v4
@@ -32,8 +31,8 @@ jobs:
       - run: npm ci
       - name: Unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Build Windows setup (cargo-xwin + NSIS)
-        run: npx tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Build Windows setup (NSIS)
+        run: npx tauri build --bundles nsis
       - name: Plugin zip and icon
         shell: bash
         run: |
@@ -42,53 +41,16 @@ jobs:
           cp .claude-plugin/plugin.json plugin/.claude-plugin/
           cp hooks/hooks.json hooks/register.tsx plugin/hooks/
           cp types/index.d.ts plugin/types/
-          (cd plugin && zip -qr "../dist/account-switcher-plugin-$v.zip" .)
-          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist/
+          (cd plugin && 7z a -tzip -bso0 "../dist/account-switcher-plugin-$v.zip" .)
+          cp src-tauri/target/release/bundle/nsis/*.exe dist/
           cp assets/icon.png dist/icon.png
           ls -la dist
-      - name: Hand over to the publish runner
-        run: |
-          : "${HANDOFF_DIR:?HANDOFF_DIR is not set on the linux-build runner}"
-          dest="$HANDOFF_DIR/$GITHUB_REPOSITORY/$GITHUB_RUN_ID"
-          mkdir -p "$dest"
-          cp dist/* "$dest/"
-          ls -la "$dest"
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: [self-hosted, update-server]
-    permissions: { contents: write }
-    steps:
-      - name: Take the build from the handoff volume
-        run: |
-          : "${HANDOFF_DIR:?HANDOFF_DIR is not set on the update-server runner}"
-          src="$HANDOFF_DIR/$GITHUB_REPOSITORY/$GITHUB_RUN_ID"
-          test -d "$src"
-          mkdir -p dist
-          cp "$src"/* dist/
-      - uses: redgreenbird-media/update-server/.github/actions/publish@main
-        with:
-          app: claude-accounts
-          version: ${{ github.ref_name }}
-          channel: ${{ contains(github.ref_name, '-') && 'beta' || 'stable' }}
-          title: Claude Accounts
-          description: Claude-Desktop-Accounts im Tray wechseln, 5h- und Wochenlimit aller Accounts sehen.
-          icon: dist/icon.png
-          files: dist/*.exe
-      - uses: redgreenbird-media/update-server/.github/actions/publish@main
-        with:
-          app: plugin-account-switcher
-          kind: plugin
-          version: ${{ github.ref_name }}
-          channel: ${{ contains(github.ref_name, '-') && 'beta' || 'stable' }}
-          title: Account Switcher (Claude Code)
-          description: Zeigt Account und Limits über dem Prompt, /accounts-Panel; schreibt die Limits für die App Claude Accounts.
-          files: dist/*.zip
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             dist/*.exe
             dist/*.zip
+            dist/icon.png
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
