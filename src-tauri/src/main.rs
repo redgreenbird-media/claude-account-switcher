@@ -286,10 +286,14 @@ fn add_account(app: AppHandle) -> Result<(), String> {
     begin_swap(&app, Target::New)
 }
 
-/// Opens the account in a Claude Desktop window of its own, next to the main one.
+/// Opens the account in a Claude Desktop window of its own, next to the main one. The account
+/// signed in to the main Desktop brings that one to the front (started again, Claude shows its window).
 fn open_window(app: &AppHandle, id: &str) -> Result<(), String> {
     let st = app.state::<App>();
     let main = claude::find_user_data().ok_or("Claude Desktop nicht gefunden")?;
+    if claude::signed_in(&main).as_deref() == Some(id) {
+        return claude::start(&main);
+    }
     let result = st.store.open_instance(&main, id);
     refresh(app);
     result

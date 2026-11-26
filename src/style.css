@@ -30,6 +30,10 @@ button.wide { display: flex; align-items: center; justify-content: center; gap: 
 #list { display: flex; flex-direction: column; gap: 8px; }
 .card { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 10px 12px; }
 .card.current { background: var(--active); border-color: var(--accent); }
+.card.showable { cursor: pointer; }
+.card.showable:hover { border-color: var(--sub); }
+.card.current.showable:hover { border-color: var(--accent); filter: brightness(.98); }
+.card.showable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .top { display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 600; font-size: 13px; }
 .who { min-width: 0; }
@@ -41,7 +45,9 @@ button.wide { display: flex; align-items: center; justify-content: center; gap: 
 .bars { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .bar { display: grid; grid-template-columns: 46px 1fr 40px; align-items: center; column-gap: 8px; }
 .bar .label { color: var(--sub); font-size: 11.5px; }
-.bar .track { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.bar .track { position: relative; height: 6px; border-radius: 3px; background: var(--track); }
+.bar .pace { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: .45; }
+.bar .pace.over { background: var(--bad); opacity: .9; }
 .bar .fill { height: 100%; border-radius: 3px; background: var(--accent); }
 .bar .fill.warn { background: var(--warn); }
 .bar .fill.bad { background: var(--bad); }

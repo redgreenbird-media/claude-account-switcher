@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0-beta.2 – 2026-11-26
+
+- **Daily pace on the weekly bar**: a mark shows how much of the weekly limit may be used by the end of today, one seventh per day of the window (day 1: 14 %, day 2: 29 %, …), so that the limit lasts until the reset. *Soll heute* under the bar gives the figure; the mark turns red once usage is past it.
+- **Click the account to show its Claude Desktop**: the whole card brings the account's Desktop to the front, not only the *Fenster*/*Zeigen* button. The active account shows the main Desktop, an account with a window of its own shows that one, any other opens a window from its saved login.
+
 ## 0.3.0-beta.1 – 2026-11-26
 
 - **Claude Desktop per account in its own window**: *Fenster* opens an account in a further Claude Desktop next to the main one, with its own data folder (`desktop\<uuid>`, started with `--user-data-dir`, which Claude keeps). The saved login goes in before the first start, so there is no sign-in. *Wechseln* to an account whose window is open closes that window first and takes its login along. An account signed in to the main Desktop gets no window. Before, a second Desktop was thought impossible: Claude ignores `CLAUDE_USER_DATA_DIR`, but not the `--user-data-dir` switch.

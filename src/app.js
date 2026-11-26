@@ -5,6 +5,7 @@ const { listen } = window.__TAURI__.event;
 const COLORS = ['#D97757', '#5B8DEF', '#3FA66B', '#A66BD9', '#D9A23F', '#3FA6A6'];
 const LABELS = { five_hour: '5 Std.', seven_day: 'Woche' };
 const DAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+const DAY = 86400000;
 const $ = (id) => document.getElementById(id);
 let view = null;
 
@@ -20,7 +21,7 @@ function clock(at, now) {
   const d = new Date(at);
   const hm = d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
   if (d.toDateString() === new Date(now).toDateString()) return `heute ${hm}`;
-  if (d.toDateString() === new Date(now + 86400000).toDateString()) return `morgen ${hm}`;
+  if (d.toDateString() === new Date(now + DAY).toDateString()) return `morgen ${hm}`;
   return `${DAYS[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}. ${hm}`;
 }
 
@@ -49,20 +50,35 @@ function el(tag, props = {}, ...children) {
   return node;
 }
 
+// Weekly budget up to the end of the current day of the window: one seventh per started day, so
+// that spending at this pace lasts exactly until the reset. Null without a known window end.
+function pace(w, now) {
+  const end = w.resetsAt || w.resetsBy;
+  if (w.kind !== 'seven_day' || w.isReset || !end) return null;
+  const elapsed = now - (end - 7 * DAY);
+  const day = Math.min(7, Math.max(1, Math.ceil(elapsed / DAY)));
+  return { day, percent: Math.round((day / 7) * 100) };
+}
+
 function bar(w, now) {
   const has = w.percent !== null && w.percent !== undefined;
   const pct = has ? Math.round(Math.min(100, Math.max(0, w.percent))) : 0;
   const level = pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : '';
+  const target = has ? pace(w, now) : null;
   let reset = '';
   if (w.isReset) reset = 'zurückgesetzt';
   else if (w.resetsAt) reset = `Reset in ${span(w.resetsAt - now)} · ${clock(w.resetsAt, now)}`;
   // Without an exact reset time: the latest it can be, one window length after the window was first seen.
   else if (has && w.resetsBy) reset = `Reset spätestens ${clock(w.resetsBy, now)}`;
+  const hint = target ? `Tag ${target.day} von 7: bis heute ${target.percent} % verbrauchen, dann reicht es bis zum Reset` : undefined;
   return el('div', { class: 'bar' },
     el('span', { class: 'label' }, LABELS[w.kind] || w.kind),
-    el('div', { class: 'track' }, el('div', { class: `fill ${level}`, style: `width:${pct}%` })),
+    el('div', { class: 'track', title: hint },
+      el('div', { class: `fill ${level}`, style: `width:${pct}%` }),
+      target ? el('div', { class: `pace${pct > target.percent ? ' over' : ''}`, style: `left:${target.percent}%` }) : null,
+    ),
     el('span', { class: 'value' }, has ? `${pct} %` : '–'),
-    reset ? el('span', { class: 'reset' }, reset) : null,
+    reset || target ? el('span', { class: 'reset', title: hint }, [reset, target ? `Soll heute ${target.percent} %` : ''].filter(Boolean).join(' · ')) : null,
   );
 }
 
@@ -83,7 +99,22 @@ function card(a, busy) {
     const same = a.terminal.toLowerCase() === a.email.toLowerCase();
     term = el('span', { class: same ? 'ok' : 'mismatch', title: same ? 'Im Terminal angemeldet' : `Im Terminal ist ${a.terminal} angemeldet` }, same ? '✓' : '!');
   }
-  return el('article', { class: `card${a.isCurrent ? ' current' : ''}` },
+  // A click anywhere on the card but its buttons shows the account's Claude Desktop: the main one,
+  // its own window, or a new window from the saved login.
+  const showable = !busy && (a.isCurrent || a.inWindow || a.hasProfile);
+  const show = (e) => {
+    if (e.target.closest('button') || (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    run(invoke('open_desktop', { id: a.id }));
+  };
+  return el('article', {
+    class: `card${a.isCurrent ? ' current' : ''}${showable ? ' showable' : ''}`,
+    title: showable ? (a.isCurrent ? 'Claude Desktop nach vorne holen' : a.inWindow ? 'Das Claude-Desktop-Fenster dieses Accounts nach vorne holen' : 'Claude Desktop mit diesem Account in einem eigenen Fenster öffnen') : undefined,
+    role: showable ? 'button' : undefined,
+    tabindex: showable ? '0' : undefined,
+    onclick: showable ? show : undefined,
+    onkeydown: showable ? show : undefined,
+  },
     el('div', { class: 'top' },
       el('div', { class: 'avatar', style: `background:${color(a.email)}` }, initials(a.name, a.email)),
       el('div', { class: 'who' }, el('b', {}, title), el('span', {}, a.email)),
