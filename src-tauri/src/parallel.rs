@@ -1,7 +1,6 @@
 //! Parallel Claude Code sessions with another account, in a terminal.
 //!
-//! Claude Desktop runs one account at a time (signed builds ignore
-//! `CLAUDE_USER_DATA_DIR`, the only way to a second instance). The Claude Code
+//! Claude Desktop runs one account per window (see `instances`). The Claude Code
 //! CLI keeps its login in `CLAUDE_CONFIG_DIR`, so each account gets its own
 //! config folder `~/.claude-accounts/<uuid>`: signed in once with `/login`,
 //! it runs next to Desktop and next to the other accounts.

@@ -70,7 +70,9 @@ function figures(w: Window | undefined, kind: string, now: number) {
       ? 'zurückgesetzt'
       : w.resetsAt
         ? `Reset in ${span(w.resetsAt - now)} (${clockTime(w.resetsAt, now)})`
-        : 'Reset unbekannt',
+        : w.resetsBy
+          ? `Reset spätestens ${clockTime(w.resetsBy, now)}`
+          : 'Reset unbekannt',
   }
 }
 
@@ -109,6 +111,7 @@ function parseAccounts(raw: unknown): Account[] {
         email: v.email,
         name: typeof v.name === 'string' ? v.name : '',
         hasProfile: v.hasProfile === true,
+        inWindow: v.inWindow === true,
         windows: Array.isArray(v.windows) ? v.windows.filter(w => w && typeof w.kind === 'string') : [],
         measuredAt: typeof v.measuredAt === 'number' ? v.measuredAt : undefined,
       },
@@ -116,13 +119,14 @@ function parseAccounts(raw: unknown): Account[] {
   })
 }
 
-/** What the Claude Accounts app last published: its exe and the accounts it knows. */
-async function readApp($: Dollar, ctx: Context): Promise<{ app?: string; accounts: Account[] }> {
+/** What the Claude Accounts app last published: its exe, the main Desktop's account and the accounts it knows. */
+async function readApp($: Dollar, ctx: Context): Promise<{ app?: string; main?: string; accounts: Account[] }> {
   try {
-    const raw = JSON.parse(await $.fs.read(`${ctx.root}\\view.json`)) as { app?: unknown; accounts?: unknown }
+    const raw = JSON.parse(await $.fs.read(`${ctx.root}\\view.json`)) as { app?: unknown; current?: unknown; accounts?: unknown }
 
     return {
       app: typeof raw.app === 'string' && raw.app.toLowerCase().endsWith('.exe') ? raw.app : undefined,
+      main: typeof raw.current === 'string' && UUID.test(raw.current) ? raw.current : undefined,
       accounts: parseAccounts(raw.accounts),
     }
   } catch {
@@ -131,7 +135,7 @@ async function readApp($: Dollar, ctx: Context): Promise<{ app?: string; account
 }
 
 async function refresh($: Dollar, ctx: Context, notice?: string) {
-  const { app, accounts } = await readApp($, ctx)
+  const { app, main, accounts } = await readApp($, ctx)
   const now = await $.clock.now()
   const me = ctx.current
   if (me) {
@@ -145,7 +149,9 @@ async function refresh($: Dollar, ctx: Context, notice?: string) {
     if (!known) accounts.unshift(mine)
   }
   accounts.sort((a, b) => (a.id === me?.id ? -1 : b.id === me?.id ? 1 : a.email.localeCompare(b.email)))
-  await update($, view, () => ({ isDesktop: ctx.isDesktop, app, currentId: me?.id, accounts, now, notice }))
+  // Signed in with another account than the main Desktop: this session runs in an account's own window.
+  const inWindow = me !== undefined && main !== undefined && main !== me.id
+  await update($, view, () => ({ isDesktop: ctx.isDesktop, app, currentId: me?.id, inWindow, accounts, now, notice }))
 }
 
 /** Writes this account's windows to limits\<uuid>.json, which the app merges into its view. */
@@ -282,7 +288,8 @@ export const register: Register = on => {
     const line = KINDS.map(k => figures(me.windows.find(w => w.kind === k), k, v.now))
       .map(l => `${l.label} ${Number.isNaN(l.percent) ? '–' : `${l.percent}%`}`)
       .join(' · ')
-    const others = v.app ? v.accounts.filter(a => a.id !== me.id && a.hasProfile) : []
+    // Switching changes the main Desktop: not offered from an account's own window.
+    const others = v.app && !v.inWindow ? v.accounts.filter(a => a.id !== me.id && a.hasProfile && !a.inWindow) : []
 
     return (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
@@ -353,6 +360,7 @@ export const register: Register = on => {
               <Text dimColor>{`  ${age}`}</Text>
               {!isCurrent &&
                 v.app &&
+                !v.inWindow &&
                 (a.hasProfile ? (
                   <Button key={`switch-${a.id}`} variant="primary" onPress={() => start($, a)}>
                     Zu diesem Account wechseln
@@ -365,7 +373,10 @@ export const register: Register = on => {
             </Box>
           )
         })}
-        {v.app && (
+        {v.inWindow && (
+          <Text dimColor>Dieses Fenster gehört einem Account allein; gewechselt wird im Haupt-Desktop.</Text>
+        )}
+        {v.app && !v.inWindow && (
           <Button key="add" onPress={() => start($)}>
             + Account hinzufügen
           </Button>

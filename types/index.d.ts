@@ -6,6 +6,8 @@ export type Window = {
   kind: string
   percent?: number | null
   resetsAt?: number | null
+  /** Without an exact reset time: the latest it can be. */
+  resetsBy?: number | null
   /** The window has reset since the reading. */
   isReset: boolean
   at?: number | null
@@ -18,6 +20,8 @@ export type Account = {
   name: string
   /** Whether a saved login exists that the app can restore. */
   hasProfile: boolean
+  /** Runs in a Claude Desktop window of its own, next to the main one. */
+  inWindow?: boolean
   windows: Window[]
   /** When the newest reading was taken (ms since epoch). */
   measuredAt?: number
@@ -28,6 +32,8 @@ export type View = {
   /** The app's exe, from its view.json; absent when the app is not installed. */
   app?: string
   currentId?: string
+  /** This session runs in an account's own window, not in the main Desktop, which switching changes. */
+  inWindow?: boolean
   accounts: Account[]
   /** Clock used for relative reset times; bumped every minute. */
   now: number

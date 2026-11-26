@@ -88,19 +88,60 @@ pub fn recorded(root: &Path) -> HashMap<String, Recorded> {
     out
 }
 
-/// Desktop's newest usage sample per organization: (when, code -> percent).
-pub fn history(user_data: &Path) -> HashMap<String, (i64, HashMap<String, f64>)> {
-    let mut out: HashMap<String, (i64, HashMap<String, f64>)> = HashMap::new();
-    let Some(samples) = read_json(&user_data.join("plan-usage-history.json")).and_then(|v| v.get("samples").cloned()) else { return out };
+/// Desktop's newest usage sample of one organization.
+#[derive(Clone, Debug, Default)]
+pub struct Sample {
+    pub at: i64,
+    /// code -> percent
+    pub figures: HashMap<String, f64>,
+    /// code -> the first sample of the window still open at `at`. The window began
+    /// before it, so it resets at the latest one window length after.
+    pub opened: HashMap<String, i64>,
+}
+
+/// Desktop's newest usage sample per organization, with when each window was first seen.
+pub fn history(user_data: &Path) -> HashMap<String, Sample> {
+    let mut series: HashMap<String, Vec<(i64, HashMap<String, f64>)>> = HashMap::new();
+    let Some(samples) = read_json(&user_data.join("plan-usage-history.json")).and_then(|v| v.get("samples").cloned()) else { return HashMap::new() };
     for s in samples.as_array().into_iter().flatten() {
         let (Some(t), Some(org), Some(u)) = (s.get("t").and_then(Value::as_f64), s.get("org").and_then(Value::as_str), s.get("u").and_then(Value::as_object)) else { continue };
-        let t = t as i64;
-        if out.get(org).map_or(true, |(old, _)| t >= *old) {
-            let figures = u.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64()?))).collect();
-            out.insert(org.to_string(), (t, figures));
+        let figures = u.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64()?))).collect();
+        series.entry(org.to_string()).or_default().push((t as i64, figures));
+    }
+    series.into_iter().filter_map(|(org, mut list)| {
+        list.sort_by_key(|(t, _)| *t);
+        Some((org, sample_of(&list)?))
+    }).collect()
+}
+
+/// The newest sample of one organization's series, and when its windows opened.
+///
+/// A window ends one length after its first request. Between two samples it ended if the
+/// figure dropped, if the samples lie a window length apart, or if the window seen open
+/// is older than its length; the next sample above 0 then belongs to a new window.
+fn sample_of(list: &[(i64, HashMap<String, f64>)]) -> Option<Sample> {
+    let (at, figures) = list.last()?.clone();
+    let mut opened = HashMap::new();
+    for (_, code, length) in KINDS {
+        let mut open: Option<i64> = None;
+        let mut prev: Option<(i64, f64)> = None;
+        for (t, u) in list {
+            let Some(p) = u.get(code).copied() else { continue };
+            open = if p <= 0.0 {
+                None
+            } else {
+                match (open, prev) {
+                    (Some(start), Some((pt, pp))) if p >= pp && t - pt < length && t - start < length => Some(start),
+                    _ => Some(*t),
+                }
+            };
+            prev = Some((*t, p));
+        }
+        if let Some(start) = open {
+            opened.insert(code.to_string(), start);
         }
     }
-    out
+    Some(Sample { at, figures, opened })
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -110,6 +151,8 @@ pub struct Window {
     /// Used share now, 0-100; `None` without any reading.
     pub percent: Option<f64>,
     pub resets_at: Option<i64>,
+    /// Without an exact reset time: the latest it can be.
+    pub resets_by: Option<i64>,
     /// The window has reset since the reading.
     pub is_reset: bool,
     /// When the reading was taken.
@@ -117,35 +160,37 @@ pub struct Window {
 }
 
 /// One account's windows as of `now`.
-pub fn windows(rec: Option<&Recorded>, sample: Option<&(i64, HashMap<String, f64>)>, now: i64) -> Vec<Window> {
+pub fn windows(rec: Option<&Recorded>, sample: Option<&Sample>, now: i64) -> Vec<Window> {
     KINDS
         .iter()
         .map(|(kind, code, length)| {
             let from_mod = rec.and_then(|r| r.windows.get(*kind));
-            let from_desktop = sample.and_then(|(t, u)| u.get(*code).map(|p| (*t, *p)));
-            let reading = match (from_mod, from_desktop) {
-                (Some(m), Some((t, p))) if t > m.at => Some(Reading {
-                    percent: p,
+            let from_desktop = sample.and_then(|s| s.figures.get(*code).map(|p| (s.at, *p)));
+            // Desktop's reading ends one window length after the window was first seen, at the latest.
+            let desktop_by = |t: i64| sample.and_then(|s| s.opened.get(*code)).copied().unwrap_or(t) + length;
+            let (reading, by) = match (from_mod, from_desktop) {
+                (Some(m), Some((t, p))) if t > m.at => {
                     // The mod's reset time still holds if the window it names was open at the sample.
-                    resets_at: m.resets_at.filter(|r| *r > t),
-                    at: t,
-                }),
-                (Some(m), _) => Some(m.clone()),
-                (None, Some((t, p))) => Some(Reading { percent: p, resets_at: None, at: t }),
-                (None, None) => None,
+                    let resets_at = m.resets_at.filter(|r| *r > t);
+                    (Some(Reading { percent: p, resets_at, at: t }), desktop_by(t))
+                }
+                (Some(m), _) => (Some(m.clone()), m.at + length),
+                (None, Some((t, p))) => (Some(Reading { percent: p, resets_at: None, at: t }), desktop_by(t)),
+                (None, None) => (None, 0),
             };
             match reading {
-                None => Window { kind: kind.to_string(), percent: None, resets_at: None, is_reset: false, at: None },
+                None => Window { kind: kind.to_string(), percent: None, resets_at: None, resets_by: None, is_reset: false, at: None },
                 Some(r) => {
                     let is_reset = match r.resets_at {
                         Some(reset) => reset <= now,
-                        // Without a reset time: a window longer ago than its own length is over for sure.
-                        None => now - r.at >= *length,
+                        None => by <= now,
                     };
                     Window {
                         kind: kind.to_string(),
                         percent: Some(if is_reset { 0.0 } else { r.percent }),
                         resets_at: r.resets_at.filter(|_| !is_reset),
+                        // At 0 % without a reset time no window is open: nothing to reset.
+                        resets_by: (r.resets_at.is_none() && !is_reset && r.percent > 0.0).then_some(by),
                         is_reset,
                         at: Some(r.at),
                     }
@@ -167,8 +212,30 @@ mod tests {
         Recorded { windows, ..Default::default() }
     }
 
-    fn sample(t: i64, fh: f64) -> (i64, HashMap<String, f64>) {
+    fn sample(t: i64, fh: f64) -> Sample {
+        sample_of(&[point(t, fh)]).unwrap()
+    }
+
+    fn point(t: i64, fh: f64) -> (i64, HashMap<String, f64>) {
         (t, HashMap::from([("fh".to_string(), fh), ("sd".to_string(), 50.0)]))
+    }
+
+    #[test]
+    fn reset_is_due_one_length_after_the_window_was_first_seen() {
+        let now = 100 * H;
+        // Old window up to 60 %, a drop: the new window was first seen at now-3h.
+        let s = sample_of(&[point(now - 9 * H, 20.0), point(now - 6 * H, 60.0), point(now - 3 * H, 5.0), point(now - H, 30.0), point(now - 60_000, 42.0)]).unwrap();
+        assert_eq!(s.opened["fh"], now - 3 * H);
+        let w = windows(None, Some(&s), now);
+        assert_eq!((w[0].percent, w[0].resets_by), (Some(42.0), Some(now + 2 * H)));
+        // A sample at 0 % closes it; a gap of a window length too.
+        let s = sample_of(&[point(now - 4 * H, 10.0), point(now - 2 * H, 0.0), point(now - H, 8.0)]).unwrap();
+        assert_eq!(s.opened["fh"], now - H);
+        let s = sample_of(&[point(now - 12 * H, 10.0), point(now - 6 * H, 15.0), point(now - H, 18.0)]).unwrap();
+        assert_eq!(s.opened["fh"], now - H);
+        // Past the latest reset the window reads 0.
+        let s = sample_of(&[point(now - 6 * H, 10.0), point(now - 5 * H + 60_000, 30.0)]).unwrap();
+        assert!(windows(None, Some(&s), now)[0].is_reset);
     }
 
     #[test]

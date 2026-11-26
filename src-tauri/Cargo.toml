@@ -1,6 +1,6 @@
 [package]
 name = "claude-accounts"
-version = "0.2.1"
+version = "0.3.0-beta.1"
 description = "Switch Claude Desktop accounts from the tray and see each account's limits"
 edition = "2021"
 publish = false
@@ -16,11 +16,17 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: config.json of Claude keeps its key order when the login keys are swapped.
 serde_json = { version = "1", features = ["preserve_order"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+native-tls = "0.2"
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
 time = { version = "0.3", features = ["parsing", "formatting", "local-offset", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+  "Wdk_System_Threading",
   "Win32_Foundation",
+  "Win32_Security_Cryptography",
   "Win32_System_Com",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_JobObjects",

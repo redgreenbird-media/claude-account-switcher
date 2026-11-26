@@ -53,4 +53,4 @@ button.wide { display: flex; align-items: center; justify-content: center; gap: 
 .foot .ok { color: #3fa66b; }
 .foot .mismatch { color: var(--warn); }
 .empty { color: var(--sub); margin: 4px 2px; }
-.hint { margin: 0 2px; color: var(--sub); font-size: 10.5px; opacity: .85; }
+.badge.outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }

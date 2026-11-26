@@ -135,7 +135,7 @@ impl Store {
         remove(&old)
     }
 
-    fn restore(&self, user_data: &Path, id: &str) -> Result<(), String> {
+    pub(crate) fn restore(&self, user_data: &Path, id: &str) -> Result<(), String> {
         let dir = self.profiles().join(id);
         let auth = read_json(&dir.join("auth.json")).ok_or_else(|| format!("kein gespeicherter Login für {id}"))?;
         for item in ITEMS {

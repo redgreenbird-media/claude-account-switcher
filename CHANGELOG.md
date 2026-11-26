@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0-beta.1 – 2026-11-26
+
+- **Claude Desktop per account in its own window**: *Fenster* opens an account in a further Claude Desktop next to the main one, with its own data folder (`desktop\<uuid>`, started with `--user-data-dir`, which Claude keeps). The saved login goes in before the first start, so there is no sign-in. *Wechseln* to an account whose window is open closes that window first and takes its login along. An account signed in to the main Desktop gets no window. Before, a second Desktop was thought impossible: Claude ignores `CLAUDE_USER_DATA_DIR`, but not the `--user-data-dir` switch.
+- **Live limits for every account**: the app asks Anthropic's usage endpoint (`/api/oauth/usage`, the one Claude Desktop asks itself) every minute and when the panel opens, with each account's own token from the logins Claude keeps (main Desktop, own windows, saved profiles). Exact reset times, also for accounts not in use. Read only: tokens are decrypted in memory (DPAPI-wrapped key in `Local State`), never written, refreshed or sent anywhere but `*.anthropic.com`; an expired one is skipped until Claude renews it. Before, figures changed only after a reply or when Desktop sampled them.
+- **Switching only touches the main Desktop**: Claude's processes are told apart by their data folder, so closing Claude for a switch leaves the other windows running.
+- **Limits of accounts in their own window** come from that window's own usage samples, without the org guesswork.
+- **Reset times without a live reading**: *Reset spätestens* is now one window length after the window was first seen in Desktop's samples (a drop, a 0 % or a gap ends a window), not after the latest sample, which pushed the time forward with every sample.
+- Mod: in an account's own window no switch buttons (switching changes the main Desktop); shows *Reset spätestens* where the app has no exact time.
+- The explanation under the account list is gone.
+
 ## 0.2.1 – 2026-11-08
 
 - **Fixed**: a switch closed Claude but did not start it again, and the app was gone afterwards. Started from a Claude Code session (or an installer run from one), the app ran inside Claude's job object and Windows ended it together with Claude, before the login was swapped. The app now leaves such a job at start.

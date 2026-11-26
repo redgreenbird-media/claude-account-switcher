@@ -1,6 +1,6 @@
 # Claude Accounts
 
-Switch Claude Desktop (Windows) between several accounts from the tray, see every account's 5-hour and weekly limit, and run Claude Code with another account in parallel.
+Switch Claude Desktop (Windows) between several accounts from the tray, open further accounts in Claude Desktop windows of their own, see every account's 5-hour and weekly limit, and run Claude Code with another account in parallel.
 
 > Unofficial. Not affiliated with or endorsed by Anthropic. It swaps Claude Desktop's local login files; use it at your own risk.
 
@@ -18,14 +18,16 @@ The app starts with Windows and sits in the tray (right-click › *Mit Windows s
 
 - **Tray panel** (click the icon): every saved account with name, e-mail, 5-hour and weekly limit, reset times and when the figures were taken. *Wechseln* switches, *Account hinzufügen* signs out so another account can sign in.
 - **Switching** closes Claude Desktop, saves the current login, puts the other one back and starts Claude again. Only the login moves: the session cookies, the web storage of the claude.ai views and two keys of `config.json`. Sessions and settings stay. If a different account than expected is signed in, nothing changes. Log: `%LOCALAPPDATA%\ClaudeAccountSwitcher\switch.log`.
-- **Limits** come from two places and the newer one wins:
-  - Claude Desktop's own usage samples (`plan-usage-history.json`, the figures of *Settings › Usage*), taken every few minutes while Desktop runs with an account. These cover inactive accounts too, from when they were last active, but carry no reset time; the panel then shows *Reset spätestens …* (the sample time plus the window length), and a window older than its length reads 0 %.
+- **Own window** (*Fenster*, per account): a further Claude Desktop with that account, next to the main one. Each account gets its own data folder `desktop\<uuid>`, started with `--user-data-dir`; Claude keeps such a folder and holds its single-instance lock per folder. The saved login is put in before the first start, so there is no sign-in. *Wechseln* to an account whose window is open closes that window first and takes its login along; the main Desktop's account gets no window. A window downloads its own copy of the Code engine on first use.
+- **Limits** come from three places and the newest one wins:
+  - Live from Anthropic, every minute and when the panel opens: the usage endpoint Claude Desktop asks itself (`/api/oauth/usage`), with each account's own token from the logins Claude keeps (main Desktop, own windows, saved profiles). Exact percentages and reset times, for accounts not in use too. Read only: the tokens are decrypted in memory with the DPAPI-wrapped key in Claude's `Local State`, never written or refreshed, and sent only to `*.anthropic.com`. An expired token is skipped until Claude renews it; the account then shows its last reading.
+  - Claude Desktop's own usage samples (`plan-usage-history.json`, the figures of *Settings › Usage*), of the main Desktop and of each account's own window. They carry no reset time: the panel shows *Reset spätestens …*, one window length after the window was first seen in the samples, and a window past that reads 0 %.
   - The mod (below), after every reply in a Code session: the windows with their exact reset times.
 - **Terminal** (per account): opens Windows Terminal in a folder you pick and starts Claude Code with that account's own login, next to Desktop and the other accounts. Each account gets its own config folder `~/.claude-accounts/<uuid>`; sign in there once with `/login`. Skills, agents, commands, plugins, hooks and projects (sessions and memory) are those of `~/.claude`; `settings.json`, the `*.md` files and the MCP servers are copied over at every start. A ✓ on the button means the terminal login matches the account.
 
-### Why not two Claude Desktop windows?
+### How the windows work
 
-Claude Desktop allows one instance per data folder. Its only switch for another data folder, `CLAUDE_USER_DATA_DIR`, is removed on start by signed builds ("signed builds ignore it"), so a second Desktop with another account is not possible without modifying the app. Parallel work therefore runs in the terminal.
+Claude Desktop allows one instance per data folder. Signed builds ignore `CLAUDE_USER_DATA_DIR`, but Claude honours the `--user-data-dir` switch and keeps such a folder as a "chosen folder". The app starts the packaged app with that switch through Windows' activation manager (as the Start menu does, with a command line). Its processes are told apart by their folder, so a switch closes only the main Desktop.
 
 ## The mod (optional)
 
@@ -48,7 +50,8 @@ Everything the app keeps is in `%LOCALAPPDATA%\ClaudeAccountSwitcher`:
 | File | What |
 | --- | --- |
 | `profiles\<uuid>\` | saved logins, encrypted the way Claude stores them (bound to your Windows user) |
-| `limits\<uuid>.json` | limits the mod recorded |
+| `desktop\<uuid>\` | data folder of the account's own Claude Desktop window |
+| `limits\<uuid>.json` | the newest live or mod reading |
 | `names.json` | names and e-mails read from Claude's cached account data |
 | `view.json` | what the panel shows, for the mod |
 | `app-settings.json` | autostart, last terminal folder |
@@ -73,7 +76,9 @@ claude plugin test .
 | --- | --- |
 | `src-tauri/src/claude.rs` | Claude Desktop's data folder, signed-in account, closing and starting it |
 | `src-tauri/src/profiles.rs` | saving and restoring logins |
-| `src-tauri/src/usage.rs` | merging Desktop's samples and the mod's readings |
+| `src-tauri/src/instances.rs` | an account's own Desktop window: its folder, login and start |
+| `src-tauri/src/usage.rs` | merging Desktop's samples and the readings in `limits\` |
+| `src-tauri/src/live.rs` | live limits from Anthropic's usage endpoint |
 | `src-tauri/src/names.rs` | names, e-mails and organizations from Claude's IndexedDB blobs |
 | `src-tauri/src/parallel.rs` | per-account Claude Code config folders and the terminal |
 | `src/` | the panel |

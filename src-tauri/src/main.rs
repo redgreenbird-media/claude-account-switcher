@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod claude;
+mod instances;
+mod live;
 mod names;
 mod parallel;
 mod profiles;
@@ -13,7 +15,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{mpsc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{
@@ -48,6 +50,8 @@ struct App {
     error: Mutex<Option<String>>,
     hidden_at: Mutex<Option<Instant>>,
     settings: Mutex<Settings>,
+    /// Asks the live poll to read now instead of at its next minute.
+    poll_now: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -62,6 +66,8 @@ struct AccountView {
     measured_at: Option<i64>,
     /// The e-mail the account's terminal login belongs to, once signed in there.
     terminal: Option<String>,
+    /// Runs in a Claude Desktop window of its own.
+    in_window: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -84,6 +90,22 @@ impl App {
         if let Ok(b) = serde_json::to_vec_pretty(&*self.settings.lock().unwrap()) {
             let _ = fs::write(self.settings_file(), b);
         }
+    }
+
+    /// Every login on disk the live poll reads tokens from: the main Desktop's, each account's own
+    /// window's, and the saved profiles' (encrypted with the main Desktop's key).
+    fn live_sources(&self) -> Vec<live::Source> {
+        let Some(main) = claude::find_user_data() else { return Vec::new() };
+        let main_state = main.join("Local State");
+        let mut sources = vec![live::Source { config: main.join("config.json"), local_state: main_state.clone() }];
+        for id in self.store.saved() {
+            sources.push(live::Source { config: self.store.profiles().join(&id).join("auth.json"), local_state: main_state.clone() });
+        }
+        for e in fs::read_dir(self.store.root.join("desktop")).into_iter().flatten().flatten() {
+            let dir = e.path();
+            sources.push(live::Source { config: dir.join("config.json"), local_state: dir.join("Local State") });
+        }
+        sources
     }
 
     /// Name, e-mail and organization of `id`, from the cache or the account's own web data.
@@ -139,9 +161,14 @@ impl App {
             .zip(&orgs)
             .map(|((id, info), org)| {
                 // Desktop's samples name only the org: use them when no other account shares it.
-                let sample = (!org.is_empty() && orgs.iter().filter(|o| *o == org).count() == 1).then(|| history.get(org)).flatten();
+                let shared = (!org.is_empty() && orgs.iter().filter(|o| *o == org).count() == 1).then(|| history.get(org)).flatten();
+                // The account's own window samples only this account: its org's figures, or its newest ones.
+                let own_dir = self.store.instance(id);
+                let own = (self.store.instance_account(id).as_deref() == Some(id.as_str())).then(|| usage::history(&own_dir)).unwrap_or_default();
+                let own = own.get(org).or_else(|| own.values().max_by_key(|s| s.at)).cloned();
+                let sample = [shared.cloned(), own].into_iter().flatten().max_by_key(|s| s.at);
                 let rec = recorded.get(id);
-                let windows = usage::windows(rec, sample, now);
+                let windows = usage::windows(rec, sample.as_ref(), now);
                 let email = info
                     .as_ref()
                     .map(|i| i.email.clone())
@@ -157,6 +184,7 @@ impl App {
                     measured_at: windows.iter().filter_map(|w| w.at).max(),
                     windows,
                     terminal: parallel::signed_in_as(id),
+                    in_window: Some(id) != current.as_ref() && self.store.instance_running(id),
                 }
             })
             .collect();
@@ -225,7 +253,12 @@ fn begin_swap(app: &AppHandle, target: Target) -> Result<(), String> {
     let app = app.clone();
     std::thread::spawn(move || {
         let st = app.state::<App>();
-        let result = st.store.swap(&user_data, expect.as_deref(), &target, true);
+        let result = match &target {
+            // The account's own window gives the account up first.
+            Target::Account(id) => st.store.take_back(id),
+            Target::New => Ok(()),
+        }
+        .and_then(|_| st.store.swap(&user_data, expect.as_deref(), &target, true));
         *st.busy.lock().unwrap() = None;
         *st.error.lock().unwrap() = result.err();
         refresh(&app);
@@ -251,6 +284,23 @@ fn switch_account(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 fn add_account(app: AppHandle) -> Result<(), String> {
     begin_swap(&app, Target::New)
+}
+
+/// Opens the account in a Claude Desktop window of its own, next to the main one.
+fn open_window(app: &AppHandle, id: &str) -> Result<(), String> {
+    let st = app.state::<App>();
+    let main = claude::find_user_data().ok_or("Claude Desktop nicht gefunden")?;
+    let result = st.store.open_instance(&main, id);
+    refresh(app);
+    result
+}
+
+#[tauri::command]
+async fn open_desktop(app: AppHandle, id: String) -> Result<(), String> {
+    if !claude::is_uuid(&id) {
+        return Err("ungültige Account-ID".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || open_window(&app, &id)).await.map_err(|e| e.to_string())?
 }
 
 /// Asks for a folder and opens a terminal there running Claude Code with the account's own login.
@@ -304,6 +354,9 @@ fn fit_panel(app: AppHandle, height: f64) {
 
 fn show_panel(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(PANEL) {
+        if let Some(tx) = app.state::<App>().poll_now.lock().unwrap().as_ref() {
+            let _ = tx.send(());
+        }
         refresh(app);
         let _ = app.emit("shown", ());
         let _ = w.show();
@@ -336,13 +389,18 @@ fn set_autostart(app: &AppHandle, on: bool) {
     }
 }
 
-/// `--switch <uuid>` / `--add` (from the Claude Code mod), `--terminal <uuid> <folder>`, else open the panel unless started `--hidden`.
+/// `--switch <uuid>` / `--add` / `--desktop <uuid>` (from the Claude Code mod), `--terminal <uuid> <folder>`, else open the panel unless started `--hidden`.
 fn handle_args(app: &AppHandle, args: &[String]) {
     let pos = |flag: &str| args.iter().position(|a| a == flag);
     let result = if let Some(i) = pos("--switch") {
         match args.get(i + 1).filter(|id| claude::is_uuid(id)) {
             Some(id) => begin_swap(app, Target::Account(id.clone())),
             None => Err("--switch braucht eine Account-ID".into()),
+        }
+    } else if let Some(i) = pos("--desktop") {
+        match args.get(i + 1).filter(|id| claude::is_uuid(id)) {
+            Some(id) => open_window(app, id),
+            None => Err("--desktop braucht eine Account-ID".into()),
         }
     } else if pos("--add").is_some() {
         begin_swap(app, Target::New)
@@ -423,7 +481,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _| handle_args(app, &args)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
-        .invoke_handler(tauri::generate_handler![get_view, switch_account, add_account, open_terminal, hide_panel, fit_panel])
+        .invoke_handler(tauri::generate_handler![get_view, switch_account, add_account, open_desktop, open_terminal, hide_panel, fit_panel])
         .setup(|app| {
             let root = claude::local_app_data().join("ClaudeAccountSwitcher");
             fs::create_dir_all(root.join("profiles"))?;
@@ -439,6 +497,7 @@ fn main() {
                 error: Mutex::default(),
                 hidden_at: Mutex::default(),
                 settings: Mutex::new(settings),
+                poll_now: Mutex::default(),
             });
             set_autostart(app.handle(), autostart);
 
@@ -476,6 +535,25 @@ fn main() {
             std::thread::spawn(move || loop {
                 refresh(&handle);
                 std::thread::sleep(Duration::from_secs(30));
+            });
+            // Live limits from Anthropic, every minute and when the panel opens (at most every 15 s).
+            let (tx, rx) = mpsc::channel::<()>();
+            *app.state::<App>().poll_now.lock().unwrap() = Some(tx);
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let Some(mut poller) = live::Poller::new() else { return };
+                loop {
+                    let st = handle.state::<App>();
+                    let started = Instant::now();
+                    if !poller.poll(&st.live_sources(), &st.store.root.join("limits")).is_empty() {
+                        refresh(&handle);
+                    }
+                    let _ = rx.recv_timeout(Duration::from_secs(60));
+                    while rx.try_recv().is_ok() {}
+                    if let Some(rest) = Duration::from_secs(15).checked_sub(started.elapsed()) {
+                        std::thread::sleep(rest);
+                    }
+                }
             });
             let args: Vec<String> = std::env::args().collect();
             handle_args(app.handle(), &args);

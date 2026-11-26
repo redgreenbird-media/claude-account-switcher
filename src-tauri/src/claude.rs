@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -87,17 +88,82 @@ pub fn start(user_data: &Path) -> Result<(), String> {
         .map_err(|e| format!("Claude starten: {e}"))
 }
 
-/// Claude Desktop's own processes and its Code sessions' engines: (pid, parent pid).
+/// Starts a further Claude Desktop on its own data folder, next to the one on the default
+/// folder (`main`, which names the package). Claude keeps a `--user-data-dir` it is started
+/// with ("chosen folder") and holds its single-instance lock per folder; started again on a
+/// folder already running, it brings that window to the front.
+pub fn start_instance(main: &Path, user_data: &Path) -> Result<(), String> {
+    let arg = format!("--user-data-dir=\"{}\"", user_data.display());
+    win::activate(&format!("{}!Claude", package_family(main)), &arg).map_err(|e| format!("Claude starten: {e}"))
+}
+
+/// Claude's own data folders under `%LOCALAPPDATA%\Claude-Data`, which a Desktop started without `--user-data-dir` uses.
+fn is_default(user_data: &Path) -> bool {
+    norm(&user_data.to_string_lossy()).starts_with(&norm(&local_app_data().join("Claude-Data").to_string_lossy()))
+}
+
+fn norm(path: &str) -> String {
+    path.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// The `--user-data-dir` a command line names.
+fn data_dir_arg(cmdline: &str) -> Option<String> {
+    const FLAG: &str = "--user-data-dir=";
+    let rest = &cmdline[cmdline.find(FLAG)? + FLAG.len()..];
+    let value = match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next()?,
+        None => rest.split(' ').next()?,
+    };
+    (!value.is_empty()).then(|| norm(value))
+}
+
+/// Where a Claude process belongs: the data folder it works on, `None` for the default one.
+/// An engine by the folder it was installed into, a Desktop process by its `--user-data-dir`,
+/// any other by the process that started it.
+fn owner(p: &win::Process, by_id: &HashMap<u32, &win::Process>) -> Option<String> {
+    let mut at = p;
+    for _ in 0..8 {
+        let path = at.path.to_ascii_lowercase();
+        if let Some(i) = path.find("\\claude-code\\") {
+            return Some(norm(&at.path[..i]));
+        }
+        if let Some(dir) = data_dir_arg(&at.cmdline) {
+            return Some(dir);
+        }
+        match by_id.get(&at.parent) {
+            Some(parent) if parent.id != at.id => at = parent,
+            _ => break,
+        }
+    }
+    None
+}
+
+/// The processes of the Claude Desktop on `user_data` and its Code sessions' engines: (pid, parent pid).
+/// Instances on other data folders are not among them.
 fn claude_processes(user_data: &Path) -> Vec<(u32, u32)> {
-    let engine = user_data.join("claude-code").to_string_lossy().to_ascii_lowercase();
-    win::processes("claude.exe")
+    let procs: Vec<win::Process> = win::processes("claude.exe")
         .into_iter()
         .filter(|p| {
             let path = p.path.to_ascii_lowercase();
-            path.contains("\\windowsapps\\claude_") || path.starts_with(&engine)
+            path.contains("\\windowsapps\\claude_") || path.contains("\\claude-code\\")
+        })
+        .collect();
+    let by_id: HashMap<u32, &win::Process> = procs.iter().map(|p| (p.id, p)).collect();
+    let me = norm(&user_data.to_string_lossy());
+    let default = is_default(user_data);
+    procs
+        .iter()
+        .filter(|p| match owner(p, &by_id) {
+            Some(dir) => dir == me,
+            None => default,
         })
         .map(|p| (p.id, p.parent))
         .collect()
+}
+
+/// Whether a Claude Desktop runs on `user_data`.
+pub fn is_running(user_data: &Path) -> bool {
+    !claude_processes(user_data).is_empty()
 }
 
 fn claude_pids(user_data: &Path) -> Vec<u32> {
@@ -157,6 +223,70 @@ mod win {
         pub id: u32,
         pub parent: u32,
         pub path: String,
+        pub cmdline: String,
+    }
+
+    /// The process's command line (empty where Windows does not hand it out).
+    fn command_line(pid: u32) -> String {
+        use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return String::new();
+            }
+            let mut need = 0u32;
+            NtQueryInformationProcess(h, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut need);
+            let mut out = String::new();
+            if need > 0 && need < 1 << 20 {
+                // u64s keep the UNICODE_STRING header at the start aligned.
+                let mut buf = vec![0u64; (need as usize).div_ceil(8)];
+                if NtQueryInformationProcess(h, ProcessCommandLineInformation, buf.as_mut_ptr().cast(), need, &mut need) >= 0 {
+                    let s = &*(buf.as_ptr() as *const windows_sys::Win32::Foundation::UNICODE_STRING);
+                    if !s.Buffer.is_null() {
+                        out = String::from_utf16_lossy(std::slice::from_raw_parts(s.Buffer, s.Length as usize / 2));
+                    }
+                }
+            }
+            CloseHandle(h);
+            out
+        }
+    }
+
+    /// Starts a packaged app with these arguments, as Windows starts it from the Start menu
+    /// but with a command line. On a thread of its own in a single-threaded COM apartment.
+    pub fn activate(app_id: &str, args: &str) -> Result<(), String> {
+        use windows_sys::{
+            core::GUID,
+            Win32::{
+                System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED},
+                UI::Shell::ApplicationActivationManager,
+            },
+        };
+        const IID_ACTIVATION_MANAGER: GUID = GUID::from_u128(0x2e941141_7f97_4756_ba1d_9decde894a3d);
+        type Activate = unsafe extern "system" fn(*mut std::ffi::c_void, *const u16, *const u16, i32, *mut u32) -> i32;
+        type Release = unsafe extern "system" fn(*mut std::ffi::c_void) -> u32;
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (id, args) = (wide(app_id), wide(args));
+        std::thread::spawn(move || unsafe {
+            let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+            let mut manager: *mut std::ffi::c_void = std::ptr::null_mut();
+            let mut hr = CoCreateInstance(&ApplicationActivationManager, std::ptr::null_mut(), CLSCTX_LOCAL_SERVER, &IID_ACTIVATION_MANAGER, &mut manager);
+            if hr >= 0 && !manager.is_null() {
+                // IApplicationActivationManager: IUnknown's three, then ActivateApplication.
+                let vtable = *(manager as *const *const usize);
+                let activate: Activate = std::mem::transmute(*vtable.add(3));
+                let release: Release = std::mem::transmute(*vtable.add(2));
+                let mut pid = 0u32;
+                hr = activate(manager, id.as_ptr(), args.as_ptr(), 0, &mut pid);
+                release(manager);
+            }
+            if com >= 0 {
+                CoUninitialize();
+            }
+            if hr >= 0 { Ok(()) } else { Err(format!("Windows lehnte den Start ab (0x{:08X})", hr as u32)) }
+        })
+        .join()
+        .unwrap_or_else(|_| Err("Start abgebrochen".into()))
     }
 
     /// Running processes with this exe name.
@@ -174,7 +304,8 @@ mod win {
                 let len = e.szExeFile.iter().position(|c| *c == 0).unwrap_or(e.szExeFile.len());
                 if String::from_utf16_lossy(&e.szExeFile[..len]).eq_ignore_ascii_case(name) {
                     if let Some(path) = image_path(e.th32ProcessID) {
-                        out.push(Process { id: e.th32ProcessID, parent: e.th32ParentProcessID, path });
+                        let cmdline = command_line(e.th32ProcessID);
+                        out.push(Process { id: e.th32ProcessID, parent: e.th32ParentProcessID, path, cmdline });
                     }
                 }
                 ok = Process32NextW(snap, &mut e);
@@ -252,9 +383,13 @@ mod win {
         pub id: u32,
         pub parent: u32,
         pub path: String,
+        pub cmdline: String,
     }
     pub fn processes(_: &str) -> Vec<Process> {
         Vec::new()
+    }
+    pub fn activate(_: &str, _: &str) -> Result<(), String> {
+        Err("nur unter Windows".into())
     }
     pub fn end(_: u32) {}
     pub fn request_quit(_: &[u32]) {}
@@ -270,6 +405,30 @@ mod tests {
         assert!(!is_uuid("648f1ecd-7746-44a3-b93d-ca4acfb8f51"));
         assert!(!is_uuid("648F1ECD-7746-44a3-b93d-ca4acfb8f510"));
         assert!(!is_uuid("../../../../../../../../../../../.."));
+    }
+
+    #[test]
+    fn processes_belong_to_their_data_folder() {
+        let p = |id: u32, parent: u32, path: &str, cmdline: &str| win::Process { id, parent, path: path.into(), cmdline: cmdline.into() };
+        let app = r"C:\Program Files\WindowsApps\Claude_6_x64__pzs\app\Claude.exe";
+        let procs = [
+            p(10, 1, app, r#""C:\x\Claude.exe""#),
+            p(11, 10, app, r#""C:\x\Claude.exe" --type=gpu-process"#),
+            p(20, 1, app, r#""C:\x\Claude.exe" --user-data-dir="C:\Users\a\AppData\Local\ClaudeAccountSwitcher\desktop\B""#),
+            p(21, 20, app, r#""C:\x\Claude.exe" --type=renderer"#),
+            p(30, 20, r"C:\Users\a\AppData\Local\ClaudeAccountSwitcher\desktop\B\claude-code\2.1\claude.exe", ""),
+            p(40, 10, r"C:\Users\a\AppData\Local\Claude-Data\claude_pzs\claude-code\2.1\claude.exe", ""),
+        ];
+        let by_id: HashMap<u32, &win::Process> = procs.iter().map(|p| (p.id, p)).collect();
+        let b = Some(r"c:\users\a\appdata\local\claudeaccountswitcher\desktop\b".to_string());
+        let owners: Vec<Option<String>> = procs.iter().map(|p| owner(p, &by_id)).collect();
+        assert_eq!(owners[0], None);
+        assert_eq!(owners[1], None);
+        assert_eq!(owners[2], b);
+        assert_eq!(owners[3], b);
+        assert_eq!(owners[4], b);
+        assert_eq!(owners[5].as_deref(), Some(r"c:\users\a\appdata\local\claude-data\claude_pzs"));
+        assert_eq!(data_dir_arg("x --user-data-dir=C:/a/b/ --y").as_deref(), Some(r"c:\a\b"));
     }
 
     #[test]

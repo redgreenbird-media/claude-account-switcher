@@ -132,3 +132,33 @@ test('without the app: limits only, no switch buttons', async ($, on) => {
   expect(await ui.find({ type: 'Button', key: 'add' })).toBeFalsy()
   await ui.unmount()
 })
+test("in an account's own window: no switching, latest reset shown", async ($, on) => {
+  // The main Desktop runs Bob; this session is Alice in her own window.
+  const view = {
+    ...VIEW,
+    current: B,
+    accounts: [
+      { ...VIEW.accounts[0], windows: [{ kind: 'five_hour', percent: 12, resetsBy: NOW + 2 * HOUR, isReset: false, at: NOW }] },
+      VIEW.accounts[1],
+    ],
+  }
+  on('env.get', (_, e) => ({ value: ENV[e.name] }))
+  on('fs.read', (_, e) => {
+    if (e.path === `${ROOT}\\view.json`) return { value: JSON.stringify(view) as never }
+    throw new Error('ENOENT')
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: NOW }))
+  on('session.usage', () => ({ value: { startedAt: NOW, context: {} as never, rateLimits: [] } }))
+  on('command.register', () => ({ value: { command: 'accounts' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /5h .*12%/ }))?.text).toContain('Reset spätestens heute 12:00')
+  expect(await ui.find({ type: 'Button', key: `switch-${B}` })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'add' })).toBeFalsy()
+  expect((await ui.find({ type: 'Text', text: /Haupt-Desktop/ }))?.text).toBeTruthy()
+  await ui.unmount()
+})

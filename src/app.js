@@ -4,7 +4,6 @@ const { listen } = window.__TAURI__.event;
 
 const COLORS = ['#D97757', '#5B8DEF', '#3FA66B', '#A66BD9', '#D9A23F', '#3FA6A6'];
 const LABELS = { five_hour: '5 Std.', seven_day: 'Woche' };
-const LENGTH = { five_hour: 5 * 3600000, seven_day: 7 * 86400000 };
 const DAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 const $ = (id) => document.getElementById(id);
 let view = null;
@@ -57,8 +56,8 @@ function bar(w, now) {
   let reset = '';
   if (w.isReset) reset = 'zurückgesetzt';
   else if (w.resetsAt) reset = `Reset in ${span(w.resetsAt - now)} · ${clock(w.resetsAt, now)}`;
-  // Without a reset time the window still ends at most one window length after the reading.
-  else if (has && w.at && LENGTH[w.kind]) reset = `Reset spätestens ${clock(w.at + LENGTH[w.kind], now)}`;
+  // Without an exact reset time: the latest it can be, one window length after the window was first seen.
+  else if (has && w.resetsBy) reset = `Reset spätestens ${clock(w.resetsBy, now)}`;
   return el('div', { class: 'bar' },
     el('span', { class: 'label' }, LABELS[w.kind] || w.kind),
     el('div', { class: 'track' }, el('div', { class: `fill ${level}`, style: `width:${pct}%` })),
@@ -71,7 +70,9 @@ function card(a, busy) {
   const title = a.name || a.email.split('@')[0];
   const action = a.isCurrent
     ? el('span', { class: 'badge' }, 'Aktiv')
-    : a.hasProfile
+    : a.inWindow
+      ? el('span', { class: 'badge outline', title: 'Läuft in einem eigenen Claude-Desktop-Fenster' }, 'Eigenes Fenster')
+      : a.hasProfile
       ? el('button', { class: 'primary', disabled: busy, onclick: () => run(invoke('switch_account', { id: a.id })) }, 'Wechseln')
       : el('span', {});
   const age = a.measuredAt
@@ -91,6 +92,11 @@ function card(a, busy) {
     el('div', { class: 'bars' }, a.windows.map((w) => bar(w, view.now))),
     el('div', { class: 'foot' },
       el('span', { class: 'age' }, age),
+      !a.isCurrent && (a.hasProfile || a.inWindow) ? el('button', {
+        disabled: busy,
+        title: a.inWindow ? 'Das Claude-Desktop-Fenster dieses Accounts nach vorne holen' : 'Claude Desktop mit diesem Account in einem eigenen Fenster öffnen, neben dem Haupt-Desktop',
+        onclick: () => run(invoke('open_desktop', { id: a.id })),
+      }, a.inWindow ? 'Zeigen' : 'Fenster') : null,
       el('button', {
         title: a.terminal ? 'Claude Code mit diesem Account in einem Terminal öffnen' : 'Claude Code mit diesem Account in einem Terminal öffnen – beim ersten Mal mit /login anmelden',
         onclick: () => run(invoke('open_terminal', { id: a.id })),
