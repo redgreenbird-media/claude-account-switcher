@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 – 2026-11-27
+
+First final release of the 0.3 line; the same as 0.3.0-beta.3. Since 0.2.1: Claude Desktop per account in its own window, live limits for every account, daily pace mark on the weekly bar, clickable account card, and releases built on a GitHub-hosted runner. Details in the beta entries below.
+
 ## 0.3.0-beta.3 – 2026-11-26
 
 The tag 0.3.0-beta.2 was never built (it still pointed at the self-hosted workflow); this is the same release.

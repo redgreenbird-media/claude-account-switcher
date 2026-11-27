@@ -1,6 +1,6 @@
 [package]
 name = "claude-accounts"
-version = "0.3.0-beta.3"
+version = "0.3.0"
 description = "Switch Claude Desktop accounts from the tray and see each account's limits"
 edition = "2021"
 publish = false
